@@ -1207,6 +1207,30 @@ async def download_attachments(
             pattern=ISSUE_KEY_PATTERN,
         ),
     ],
+    filename_pattern: Annotated[
+        str | None,
+        Field(
+            description=(
+                "(Optional) Case-insensitive glob selecting attachments by "
+                "filename, e.g. '*.log' or 'report-*.pdf'. Omit for all "
+                "attachments; the ones excluded are listed under 'skipped'."
+            ),
+            default=None,
+        ),
+    ] = None,
+    target_dir: Annotated[
+        str | None,
+        Field(
+            description=(
+                "(Optional) Save the files into this directory instead of "
+                "returning their content inline, and report the paths written. "
+                "Only allowed under the directory the server sets in "
+                "JIRA_ATTACHMENT_DOWNLOAD_DIR; a relative path is resolved "
+                "against it. Refused when that variable is unset."
+            ),
+            default=None,
+        ),
+    ] = None,
 ) -> list[TextContent | EmbeddedResource]:
     """Download attachments from a Jira issue.
 
@@ -1218,19 +1242,78 @@ async def download_attachments(
     forward ``EmbeddedResource`` blobs for recognized image MIME types and
     otherwise drop the attachment (#1419).
 
+    With ``target_dir`` the files are written to disk instead, which suits
+    large attachments and anything another tool must open from a path. The
+    server only allows this under ``JIRA_ATTACHMENT_DOWNLOAD_DIR``; the
+    response is then a single JSON summary listing the paths written.
+
+    On Jira Server/DC an attachment whose own URL is refused (for instance
+    by a URL filter that denies ``*.log``) is retried through filter-safe
+    spellings of that URL and, failing that, through the issue's
+    "Download all" archive. Failures carry the server's answer.
+
     Args:
         ctx: The FastMCP context.
         issue_key: Jira issue key.
+        filename_pattern: Glob selecting attachments by filename.
+        target_dir: Directory to save the files into, under
+            JIRA_ATTACHMENT_DOWNLOAD_DIR.
 
     Returns:
         A list containing a text summary, one EmbeddedResource per
         downloaded image attachment, and one TextContent (base64 payload)
-        per downloaded non-image attachment.
+        per downloaded non-image attachment; with ``target_dir``, the text
+        summary alone.
     """
     jira = await get_jira_fetcher(ctx)
-    result = jira.get_issue_attachment_contents(issue_key=issue_key)
 
     contents: list[TextContent | EmbeddedResource] = []
+
+    if target_dir is not None:
+        base_dir = jira.config.attachment_download_dir
+        if not base_dir:
+            contents.append(
+                TextContent(
+                    type="text",
+                    text=json.dumps(
+                        {
+                            "success": False,
+                            "error": (
+                                "Saving attachments to disk is disabled on this "
+                                "server: set JIRA_ATTACHMENT_DOWNLOAD_DIR to the "
+                                "directory downloads may be written under, or "
+                                "omit target_dir to receive the content inline."
+                            ),
+                        },
+                        indent=2,
+                        ensure_ascii=False,
+                    ),
+                )
+            )
+            return contents
+        try:
+            saved = await run_jira_fetcher_call(
+                jira.download_issue_attachments,
+                issue_key=issue_key,
+                target_dir=target_dir,
+                filename_pattern=filename_pattern,
+                base_dir=base_dir,
+            )
+        except ValueError as exc:
+            saved = {"success": False, "error": str(exc)}
+        contents.append(
+            TextContent(
+                type="text",
+                text=json.dumps(saved, indent=2, ensure_ascii=False),
+            )
+        )
+        return contents
+
+    result = await run_jira_fetcher_call(
+        jira.get_issue_attachment_contents,
+        issue_key=issue_key,
+        filename_pattern=filename_pattern,
+    )
 
     if not result.get("success"):
         contents.append(
@@ -1309,6 +1392,7 @@ async def download_attachments(
         "total": result.get("total", 0),
         "downloaded": downloaded,
         "failed": failed,
+        "skipped": result.get("skipped", []),
     }
 
     if not attachments and not failed:

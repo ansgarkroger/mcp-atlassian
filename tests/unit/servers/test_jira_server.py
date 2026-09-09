@@ -43,6 +43,7 @@ def mock_jira_fetcher():
     mock_fetcher.config.read_only = False
     mock_fetcher.config.url = "https://test.atlassian.net"
     mock_fetcher.config.projects_filter = None  # Explicitly set to None by default
+    mock_fetcher.config.attachment_download_dir = None  # Inline-only by default
 
     # Configure common methods
     mock_fetcher.get_current_user_account_id.return_value = "test-account-id"
@@ -4920,3 +4921,139 @@ async def test_jira_analysis_tools_return_structured_errors(
 
     assert content["success"] is False
     assert content["error"] == "service unavailable"
+
+
+# --- Tests for jira_get_issue comment_limit above the former cap of 100 ---
+
+
+@pytest.mark.anyio
+async def test_get_issue_accepts_comment_limit_above_100(
+    jira_client, mock_jira_fetcher
+):
+    """Long threads need more than 100 newest comments; the cap is 1000 now."""
+    response = await jira_client.call_tool(
+        "jira_get_issue",
+        {"issue_key": "TEST-123", "comment_limit": 500},
+    )
+    content = json.loads(response.content[0].text)
+    assert content["comment_limit"] == 500
+
+
+# --- Tests for jira_download_attachments filename_pattern / target_dir ---
+
+
+@pytest.mark.anyio
+async def test_download_attachments_passes_filename_pattern(
+    jira_client, mock_jira_fetcher
+):
+    """The glob reaches the fetcher and the skipped names are reported."""
+    mock_jira_fetcher.get_issue_attachment_contents.return_value = {
+        "success": True,
+        "issue_key": "TEST-123",
+        "total": 3,
+        "attachments": [
+            {
+                "filename": "svc.log",
+                "content_type": "text/plain",
+                "size": 3,
+                "data": b"abc",
+            }
+        ],
+        "failed": [],
+        "skipped": ["a.png", "b.png"],
+    }
+
+    response = await jira_client.call_tool(
+        "jira_download_attachments",
+        {"issue_key": "TEST-123", "filename_pattern": "*.log"},
+    )
+
+    mock_jira_fetcher.get_issue_attachment_contents.assert_called_once_with(
+        issue_key="TEST-123", filename_pattern="*.log"
+    )
+    summary = json.loads(response.content[0].text)
+    assert summary["downloaded"] == 1
+    assert summary["skipped"] == ["a.png", "b.png"]
+    assert len(response.content) == 2
+
+
+@pytest.mark.anyio
+async def test_download_attachments_target_dir_refused_without_download_dir(
+    jira_client, mock_jira_fetcher
+):
+    """Without JIRA_ATTACHMENT_DOWNLOAD_DIR nothing is written to disk."""
+    mock_jira_fetcher.config.attachment_download_dir = None
+
+    response = await jira_client.call_tool(
+        "jira_download_attachments",
+        {"issue_key": "TEST-123", "target_dir": "evidence"},
+    )
+
+    summary = json.loads(response.content[0].text)
+    assert summary["success"] is False
+    assert "JIRA_ATTACHMENT_DOWNLOAD_DIR" in summary["error"]
+    mock_jira_fetcher.download_issue_attachments.assert_not_called()
+    mock_jira_fetcher.get_issue_attachment_contents.assert_not_called()
+
+
+@pytest.mark.anyio
+async def test_download_attachments_target_dir_writes_under_download_dir(
+    jira_client, mock_jira_fetcher
+):
+    """target_dir is confined to the configured base and the paths reported."""
+    mock_jira_fetcher.config.attachment_download_dir = "/srv/downloads"
+    mock_jira_fetcher.download_issue_attachments.return_value = {
+        "success": True,
+        "issue_key": "TEST-123",
+        "total": 2,
+        "downloaded": [
+            {
+                "filename": "svc.log",
+                "path": "/srv/downloads/evidence/svc.log",
+                "size": 5,
+            }
+        ],
+        "failed": [],
+        "skipped": ["a.png"],
+    }
+
+    response = await jira_client.call_tool(
+        "jira_download_attachments",
+        {
+            "issue_key": "TEST-123",
+            "target_dir": "evidence",
+            "filename_pattern": "*.log",
+        },
+    )
+
+    mock_jira_fetcher.download_issue_attachments.assert_called_once_with(
+        issue_key="TEST-123",
+        target_dir="evidence",
+        filename_pattern="*.log",
+        base_dir="/srv/downloads",
+    )
+    mock_jira_fetcher.get_issue_attachment_contents.assert_not_called()
+    assert len(response.content) == 1
+    summary = json.loads(response.content[0].text)
+    assert summary["downloaded"][0]["path"] == "/srv/downloads/evidence/svc.log"
+    assert summary["skipped"] == ["a.png"]
+
+
+@pytest.mark.anyio
+async def test_download_attachments_target_dir_escaping_base_is_reported(
+    jira_client, mock_jira_fetcher
+):
+    """A traversal attempt comes back as an error, not an exception."""
+    mock_jira_fetcher.config.attachment_download_dir = "/srv/downloads"
+    mock_jira_fetcher.download_issue_attachments.side_effect = ValueError(
+        "Path traversal detected: ../etc resolves outside /srv/downloads"
+    )
+
+    response = await jira_client.call_tool(
+        "jira_download_attachments",
+        {"issue_key": "TEST-123", "target_dir": "../etc"},
+    )
+
+    summary = json.loads(response.content[0].text)
+    assert summary["success"] is False
+    assert "outside /srv/downloads" in summary["error"]

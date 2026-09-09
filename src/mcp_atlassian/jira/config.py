@@ -39,6 +39,18 @@ def normalize_project_key(raw: str) -> str:
     return raw.translate(_INVISIBLE_CHARS).strip().upper()
 
 
+def _parse_attachment_download_dir(value: str | None) -> str | None:
+    """Normalise JIRA_ATTACHMENT_DOWNLOAD_DIR to an absolute path, or None.
+
+    ``~`` is expanded and a relative path is anchored on the server's working
+    directory once, at startup, so the confinement base does not drift with
+    later ``chdir`` calls.
+    """
+    if not value or not value.strip():
+        return None
+    return os.path.abspath(os.path.expanduser(value.strip()))
+
+
 def _parse_internal_only_projects(raw: str | None) -> frozenset[str]:
     """Parse JIRA_INTERNAL_ONLY_PROJECTS into a set of normalized project keys.
 
@@ -186,6 +198,10 @@ class JiraConfig:
     client_key_password: str | None = None  # Password for encrypted private key
     sla_config: SLAConfig | None = None  # Optional SLA configuration
     timeout: int = 75  # Connection timeout in seconds
+    attachment_download_dir: str | None = None  # Directory under which
+    # jira_download_attachments may save files (its target_dir mode). None
+    # (the default) keeps attachment content inline only. See
+    # JIRA_ATTACHMENT_DOWNLOAD_DIR.
     internal_only_projects: frozenset[str] = field(
         default_factory=frozenset
     )  # Project keys where jira_add_comment/jira_edit_comment enforce
@@ -337,6 +353,12 @@ class JiraConfig:
             os.getenv("JIRA_INTERNAL_ONLY_PROJECTS")
         )
 
+        # Directory downloads may be written under (jira_download_attachments
+        # target_dir mode). Unset: attachment content is only returned inline.
+        attachment_download_dir = _parse_attachment_download_dir(
+            os.getenv("JIRA_ATTACHMENT_DOWNLOAD_DIR")
+        )
+
         # Proxy settings
         proxy_settings = get_proxy_settings_from_env("JIRA")
 
@@ -368,6 +390,7 @@ class JiraConfig:
             oauth_config=oauth_config,
             ssl_verify=ssl_verify,
             projects_filter=projects_filter,
+            attachment_download_dir=attachment_download_dir,
             http_proxy=proxy_settings["http_proxy"],
             https_proxy=proxy_settings["https_proxy"],
             no_proxy=proxy_settings["no_proxy"],

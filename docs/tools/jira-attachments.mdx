@@ -12,6 +12,8 @@ Download attachments from a Jira issue.
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
 | `issue_key` | `string` | Yes | Jira issue key (e.g., 'PROJ-123', 'ACV2-642') |
+| `filename_pattern` | `string` | No | (Optional) Case-insensitive glob selecting attachments by filename, e.g. '*.log' or 'report-*.pdf'. Omit for all attachments; the ones excluded are listed under 'skipped'. |
+| `target_dir` | `string` | No | (Optional) Save the files into this directory instead of returning their content inline, and report the paths written. Only allowed under the directory the server sets in JIRA_ATTACHMENT_DOWNLOAD_DIR; a relative path is resolved against it. Refused when that variable is unset. |
 **Example:**
 
 ```json

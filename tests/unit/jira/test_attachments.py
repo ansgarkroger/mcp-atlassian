@@ -6,7 +6,11 @@ from unittest.mock import MagicMock, mock_open, patch
 import pytest
 
 from mcp_atlassian.jira import JiraFetcher
-from mcp_atlassian.jira.attachments import AttachmentsMixin
+from mcp_atlassian.jira.attachments import (
+    AttachmentFetchError,
+    AttachmentsMixin,
+    attachment_url_candidates,
+)
 
 # Test scenarios for AttachmentsMixin
 #
@@ -205,7 +209,7 @@ class TestAttachmentsMixin:
             assert result is False
 
     def test_download_issue_attachments_success(
-        self, attachments_mixin: AttachmentsMixin
+        self, attachments_mixin: AttachmentsMixin, tmp_path: Path
     ):
         """Test successful download of all issue attachments."""
         # Mock the issue data
@@ -238,20 +242,21 @@ class TestAttachmentsMixin:
         mock_attachment2.url = "https://test.url/attachment2"
         mock_attachment2.size = 200
 
-        # Mock the download_attachment method
+        target = tmp_path / "attachments"
         with (
             patch.object(
-                attachments_mixin, "download_attachment", return_value=True
+                attachments_mixin,
+                "_open_issue_attachment",
+                side_effect=[iter([b"x" * 100]), iter([b"y" * 200])],
             ) as mock_download,
-            patch("pathlib.Path.mkdir") as mock_mkdir,
             patch(
                 "mcp_atlassian.models.jira.JiraAttachment.from_api_response",
                 side_effect=[mock_attachment1, mock_attachment2],
             ),
-            patch("os.getcwd", return_value="/tmp"),
+            patch("os.getcwd", return_value=str(tmp_path)),
         ):
             result = attachments_mixin.download_issue_attachments(
-                "TEST-123", "/tmp/attachments"
+                "TEST-123", str(target)
             )
 
             # Assertions
@@ -261,7 +266,9 @@ class TestAttachmentsMixin:
             assert result["total"] == 2
             assert result["issue_key"] == "TEST-123"
             assert mock_download.call_count == 2
-            mock_mkdir.assert_called_once()
+            assert (target / "test1.txt").stat().st_size == 100
+            assert (target / "test2.txt").stat().st_size == 200
+            assert result["downloaded"][0]["size"] == 100
 
     def test_download_issue_attachments_relative_path(
         self, attachments_mixin: AttachmentsMixin
@@ -290,8 +297,9 @@ class TestAttachmentsMixin:
         # Mock path operations
         with (
             patch.object(
-                attachments_mixin, "download_attachment", return_value=True
-            ) as mock_download,
+                attachments_mixin, "_open_issue_attachment", return_value=iter([])
+            ),
+            patch.object(attachments_mixin, "_write_chunks", return_value=100),
             patch("pathlib.Path.mkdir") as mock_mkdir,
             patch(
                 "mcp_atlassian.models.jira.JiraAttachment.from_api_response",
@@ -302,8 +310,12 @@ class TestAttachmentsMixin:
             patch("os.getcwd", return_value="/absolute/path"),
             patch("mcp_atlassian.jira.attachments.validate_safe_path"),
         ):
-            mock_isabs.return_value = False
-            mock_abspath.return_value = "/absolute/path/attachments"
+            # Only the caller's path is relative; Path.resolve() must still
+            # see the mocked absolute results as absolute.
+            mock_isabs.side_effect = lambda p: str(p) != "attachments"
+            mock_abspath.side_effect = lambda p: (
+                "/absolute/path/attachments" if p == "attachments" else p
+            )
 
             result = attachments_mixin.download_issue_attachments(
                 "TEST-123", "attachments"
@@ -311,8 +323,8 @@ class TestAttachmentsMixin:
 
             # Assertions
             assert result["success"] is True
-            mock_isabs.assert_called_once_with("attachments")
-            mock_abspath.assert_called_once_with("attachments")
+            mock_isabs.assert_any_call("attachments")
+            mock_abspath.assert_any_call("attachments")
 
     def test_download_issue_attachments_no_attachments(
         self, attachments_mixin: AttachmentsMixin
@@ -370,7 +382,7 @@ class TestAttachmentsMixin:
         assert "Could not retrieve issue" in result["error"]
 
     def test_download_issue_attachments_some_failures(
-        self, attachments_mixin: AttachmentsMixin
+        self, attachments_mixin: AttachmentsMixin, tmp_path: Path
     ):
         """Test download when some attachments fail to download."""
         # Mock the issue data
@@ -403,20 +415,24 @@ class TestAttachmentsMixin:
         mock_attachment2.url = "https://test.url/attachment2"
         mock_attachment2.size = 200
 
-        # Mock the download_attachment method to succeed for first attachment and fail for second
+        # First attachment streams, the second is refused by the server
         with (
             patch.object(
-                attachments_mixin, "download_attachment", side_effect=[True, False]
+                attachments_mixin,
+                "_open_issue_attachment",
+                side_effect=[
+                    iter([b"x" * 100]),
+                    AttachmentFetchError("HTTP 502 Bad Gateway for attachment2"),
+                ],
             ) as mock_download,
-            patch("pathlib.Path.mkdir") as mock_mkdir,
             patch(
                 "mcp_atlassian.models.jira.JiraAttachment.from_api_response",
                 side_effect=[mock_attachment1, mock_attachment2],
             ),
-            patch("os.getcwd", return_value="/tmp"),
+            patch("os.getcwd", return_value=str(tmp_path)),
         ):
             result = attachments_mixin.download_issue_attachments(
-                "TEST-123", "/tmp/attachments"
+                "TEST-123", str(tmp_path / "attachments")
             )
 
             # Assertions
@@ -425,6 +441,7 @@ class TestAttachmentsMixin:
             assert len(result["failed"]) == 1
             assert result["downloaded"][0]["filename"] == "test1.txt"
             assert result["failed"][0]["filename"] == "test2.txt"
+            assert "502" in result["failed"][0]["error"]
             assert mock_download.call_count == 2
 
     def test_download_issue_attachments_missing_url(
@@ -861,8 +878,8 @@ class TestAttachmentsMixin:
         with (
             patch.object(
                 attachments_mixin,
-                "fetch_attachment_content",
-                side_effect=[b"content1", b"image_data"],
+                "_open_issue_attachment",
+                side_effect=[iter([b"content1"]), iter([b"image_data"])],
             ) as mock_fetch,
             patch(
                 "mcp_atlassian.models.jira.JiraAttachment.from_api_response",
@@ -958,8 +975,13 @@ class TestAttachmentsMixin:
         with (
             patch.object(
                 attachments_mixin,
-                "fetch_attachment_content",
-                side_effect=[b"good_data", None],
+                "_open_issue_attachment",
+                side_effect=[
+                    iter([b"good_data"]),
+                    AttachmentFetchError(
+                        "HTTP 502 Bad Gateway for https://test.url/bad"
+                    ),
+                ],
             ),
             patch(
                 "mcp_atlassian.models.jira.JiraAttachment.from_api_response",
@@ -973,6 +995,7 @@ class TestAttachmentsMixin:
             assert len(result["failed"]) == 1
             assert result["attachments"][0]["filename"] == "good.txt"
             assert result["failed"][0]["filename"] == "bad.txt"
+            assert "502" in result["failed"][0]["error"]
 
     def test_get_issue_attachment_contents_missing_url(
         self, attachments_mixin: AttachmentsMixin
@@ -1034,7 +1057,7 @@ class TestAttachmentsMixin:
         with (
             patch.object(
                 attachments_mixin,
-                "fetch_attachment_content",
+                "_open_issue_attachment",
             ) as mock_fetch,
             patch(
                 "mcp_atlassian.models.jira.JiraAttachment.from_api_response",
@@ -1074,8 +1097,8 @@ class TestAttachmentsMixin:
         with (
             patch.object(
                 attachments_mixin,
-                "fetch_attachment_content",
-                return_value=b"data",
+                "_open_issue_attachment",
+                return_value=iter([b"data"]),
             ) as mock_fetch,
             patch(
                 "mcp_atlassian.models.jira.JiraAttachment.from_api_response",
@@ -1114,8 +1137,8 @@ class TestAttachmentsMixin:
         with (
             patch.object(
                 attachments_mixin,
-                "fetch_attachment_content",
-                return_value=b"small content",
+                "_open_issue_attachment",
+                return_value=iter([b"small content"]),
             ) as mock_fetch,
             patch(
                 "mcp_atlassian.models.jira.JiraAttachment.from_api_response",
@@ -1176,8 +1199,8 @@ class TestAttachmentsMixin:
         with (
             patch.object(
                 attachments_mixin,
-                "fetch_attachment_content",
-                side_effect=[b"small data", b"medium data"],
+                "_open_issue_attachment",
+                side_effect=[iter([b"small data"]), iter([b"medium data"])],
             ) as mock_fetch,
             patch(
                 "mcp_atlassian.models.jira.JiraAttachment.from_api_response",
@@ -1423,3 +1446,301 @@ class TestUploadPathTraversalRegression:
             "download targeting the CWD (where Python imports modules) must be "
             "confined to a dedicated directory, not allowed to overwrite source files"
         )
+
+
+def _response(
+    status: int = 200,
+    body: bytes = b"",
+    content_type: str = "application/octet-stream",
+    url: str = "https://jira.example.com/x",
+    history: list | None = None,
+) -> MagicMock:
+    """A requests.Response stand-in for the attachment transport."""
+    response = MagicMock()
+    response.status_code = status
+    response.reason = {200: "OK", 502: "Bad Gateway", 404: "Not Found"}.get(
+        status, "Error"
+    )
+    response.headers = {"Content-Type": content_type}
+    response.url = url
+    response.history = history or []
+    response.iter_content.side_effect = lambda chunk_size=8192: iter([body])
+    if status >= 400:
+        response.raise_for_status.side_effect = Exception(f"{status} error")
+    return response
+
+
+class TestAttachmentDownloadFallbacks:
+    """Regression tests for downloads refused in front of Jira Server/DC.
+
+    An EC "Web Filter" answers 502 for every ``/secure/attachment/.../*.log``
+    URL while the same bytes are served under a filter-safe spelling of the
+    URL and inside the issue's "Download all" archive.
+    """
+
+    LOG_URL = (
+        "https://jira.example.com/secure/attachment/356717/"
+        "%5BSMT+IM1017179%5D+JB_DMA_510.log"
+    )
+    ENCODED_URL = (
+        "https://jira.example.com/secure/attachment/356717/"
+        "%5BSMT+IM1017179%5D+JB_DMA_510%2Elog"
+    )
+    BARE_URL = "https://jira.example.com/secure/attachment/356717/"
+
+    @pytest.fixture
+    def dc_mixin(self, jira_fetcher: JiraFetcher) -> AttachmentsMixin:
+        mixin = jira_fetcher
+        mixin.jira = MagicMock()
+        mixin.jira._session = MagicMock()
+        mixin.config = MagicMock(is_cloud=False, url="https://jira.example.com/")
+        return mixin
+
+    def test_url_candidates_for_server_dc(self):
+        assert attachment_url_candidates(self.LOG_URL) == [
+            self.LOG_URL,
+            self.ENCODED_URL,
+            self.BARE_URL,
+        ]
+
+    def test_url_candidates_keep_query_and_skip_cloud(self):
+        url = "https://jira.example.com/secure/attachment/1/a.b.log?x=1"
+        assert attachment_url_candidates(url) == [
+            url,
+            "https://jira.example.com/secure/attachment/1/a.b%2Elog?x=1",
+            "https://jira.example.com/secure/attachment/1/?x=1",
+        ]
+        cloud = "https://x.atlassian.net/rest/api/3/attachment/content/10"
+        assert attachment_url_candidates(cloud) == [cloud]
+
+    def test_filter_block_is_retried_with_encoded_extension(self, dc_mixin):
+        blocked = _response(
+            502,
+            b"<HTML><HEAD><TITLE>Web Filter</TITLE></HEAD>",
+            content_type="text/html; charset=utf-8",
+        )
+        served = _response(200, b"log lines", content_type="text/plain")
+        dc_mixin.jira._session.get.side_effect = [blocked, served]
+
+        assert dc_mixin.fetch_attachment_content(self.LOG_URL) == b"log lines"
+
+        urls = [c.args[0] for c in dc_mixin.jira._session.get.call_args_list]
+        assert urls == [self.LOG_URL, self.ENCODED_URL]
+
+    def test_failure_reports_status_and_page_title(self, dc_mixin):
+        dc_mixin.jira._session.get.side_effect = lambda url, **kw: _response(
+            502,
+            b"<html><head><title>Web Filter</title></head></html>",
+            content_type="text/html",
+            url=url,
+        )
+
+        with pytest.raises(AttachmentFetchError) as excinfo:
+            dc_mixin._open_attachment_with_fallback(self.LOG_URL)
+
+        message = str(excinfo.value)
+        assert 'HTTP 502 Bad Gateway (page title: "Web Filter")' in message
+        assert message.count("; then ") == 2  # all three spellings were tried
+
+    def test_transport_error_is_not_retried(self, dc_mixin):
+        dc_mixin.jira._session.get.side_effect = ConnectionError("boom")
+
+        with pytest.raises(AttachmentFetchError, match="boom"):
+            dc_mixin._open_attachment_with_fallback(self.LOG_URL)
+
+        assert dc_mixin.jira._session.get.call_count == 1
+
+    def test_login_redirect_is_an_authentication_error(self, dc_mixin):
+        login = _response(
+            200,
+            b"<html>login</html>",
+            content_type="text/html",
+            url="https://jira.example.com/login.jsp?os_destination=x",
+            history=[_response(302)],
+        )
+        dc_mixin.jira._session.get.return_value = login
+
+        with pytest.raises(AttachmentFetchError, match="login page"):
+            dc_mixin._open_attachment(self.LOG_URL)
+
+    @staticmethod
+    def _archive_bytes(members: dict[str, bytes]) -> bytes:
+        import io
+        import zipfile
+
+        buffer = io.BytesIO()
+        with zipfile.ZipFile(buffer, "w") as archive:
+            for name, data in members.items():
+                archive.writestr(name, data)
+        return buffer.getvalue()
+
+    def _issue_with_log(self, dc_mixin, size: int) -> None:
+        dc_mixin.jira.issue.return_value = {
+            "id": "306845",
+            "fields": {
+                "attachment": [
+                    {
+                        "id": "356717",
+                        "filename": "svc.log",
+                        "content": self.LOG_URL,
+                        "size": size,
+                        "mimeType": "text/plain",
+                    },
+                    {
+                        "id": "1",
+                        "filename": "shot.png",
+                        "content": "https://jira.example.com/secure/attachment/1/shot.png",
+                        "size": 3,
+                        "mimeType": "image/png",
+                    },
+                ]
+            },
+        }
+
+    def test_archive_fallback_serves_the_blocked_attachment(self, dc_mixin):
+        """Every spelling is refused: the Download-all zip is used instead."""
+        zip_bytes = self._archive_bytes({"svc.log": b"from zip", "shot.png": b"png"})
+
+        def fake_get(url, **kwargs):
+            if url.endswith("/secure/attachmentzip/306845.zip"):
+                return _response(200, zip_bytes, content_type="application/zip")
+            if "/secure/attachment/1/" in url:
+                return _response(200, b"png", content_type="image/png")
+            return _response(
+                502, b"<title>Web Filter</title>", content_type="text/html"
+            )
+
+        dc_mixin.jira._session.get.side_effect = fake_get
+        self._issue_with_log(dc_mixin, size=8)
+
+        result = dc_mixin.get_issue_attachment_contents("ISSUE-1")
+
+        assert result["failed"] == []
+        by_name = {a["filename"]: a["data"] for a in result["attachments"]}
+        assert by_name == {"svc.log": b"from zip", "shot.png": b"png"}
+        zip_calls = [
+            c.args[0]
+            for c in dc_mixin.jira._session.get.call_args_list
+            if "attachmentzip" in c.args[0]
+        ]
+        assert zip_calls == ["https://jira.example.com/secure/attachmentzip/306845.zip"]
+
+    def test_archive_fallback_failure_is_reported_with_both_reasons(self, dc_mixin):
+        dc_mixin.jira._session.get.side_effect = lambda url, **kw: _response(
+            502, b"", url=url
+        )
+        self._issue_with_log(dc_mixin, size=8)
+
+        result = dc_mixin.get_issue_attachment_contents("ISSUE-1", "*.log")
+
+        assert result["skipped"] == ["shot.png"]
+        assert len(result["failed"]) == 1
+        error = result["failed"][0]["error"]
+        assert "HTTP 502" in error
+        assert "archive fallback failed" in error
+        assert "attachmentzip/306845.zip" in error
+
+    def test_archive_fallback_is_not_used_on_cloud(self, dc_mixin):
+        dc_mixin.config.is_cloud = True
+        dc_mixin.jira._session.get.side_effect = lambda url, **kw: _response(
+            502, b"", url=url
+        )
+        self._issue_with_log(dc_mixin, size=8)
+
+        result = dc_mixin.get_issue_attachment_contents("ISSUE-1", "*.log")
+
+        assert "archive" not in result["failed"][0]["error"]
+        assert not any(
+            "attachmentzip" in c.args[0]
+            for c in dc_mixin.jira._session.get.call_args_list
+        )
+
+    def test_download_to_disk_uses_archive_and_verifies_size(
+        self, dc_mixin, tmp_path: Path
+    ):
+        zip_bytes = self._archive_bytes({"svc.log": b"from zip", "shot.png": b"png"})
+
+        def fake_get(url, **kwargs):
+            if url.endswith(".zip"):
+                return _response(200, zip_bytes, content_type="application/zip")
+            if "/secure/attachment/1/" in url:
+                return _response(200, b"png", content_type="image/png")
+            return _response(502, b"", url=url)
+
+        dc_mixin.jira._session.get.side_effect = fake_get
+        self._issue_with_log(dc_mixin, size=8)
+
+        result = dc_mixin.download_issue_attachments(
+            "ISSUE-1", "evidence/ISSUE-1", base_dir=tmp_path
+        )
+
+        assert result["failed"] == []
+        assert (tmp_path / "evidence/ISSUE-1/svc.log").read_bytes() == b"from zip"
+        assert (tmp_path / "evidence/ISSUE-1/shot.png").read_bytes() == b"png"
+        assert {d["filename"]: d["size"] for d in result["downloaded"]} == {
+            "svc.log": 8,
+            "shot.png": 3,
+        }
+
+    def test_download_to_disk_discards_truncated_files(self, dc_mixin, tmp_path: Path):
+        dc_mixin.jira._session.get.return_value = _response(
+            200, b"short", content_type="text/plain"
+        )
+        dc_mixin.jira.issue.return_value = {
+            "id": "1",
+            "fields": {
+                "attachment": [
+                    {
+                        "filename": "big.txt",
+                        "content": "https://jira.example.com/secure/attachment/2/big.txt",
+                        "size": 1000,
+                    }
+                ]
+            },
+        }
+
+        result = dc_mixin.download_issue_attachments(
+            "ISSUE-1", "out", base_dir=tmp_path
+        )
+
+        assert result["downloaded"] == []
+        assert "Jira reports 1000 bytes" in result["failed"][0]["error"]
+        assert not (tmp_path / "out/big.txt").exists()
+
+    @pytest.mark.parametrize("target_dir", ["../outside", "/etc", "."])
+    def test_download_to_disk_is_confined_to_base_dir(
+        self, dc_mixin, tmp_path: Path, target_dir: str
+    ):
+        with pytest.raises(ValueError):
+            dc_mixin.download_issue_attachments(
+                "ISSUE-1", target_dir, base_dir=tmp_path
+            )
+        dc_mixin.jira.issue.assert_not_called()
+
+    def test_filename_pattern_is_case_insensitive(self, dc_mixin, tmp_path: Path):
+        dc_mixin.jira._session.get.return_value = _response(200, b"abc")
+        dc_mixin.jira.issue.return_value = {
+            "id": "1",
+            "fields": {
+                "attachment": [
+                    {
+                        "filename": "Report.PDF",
+                        "content": "https://jira.example.com/secure/attachment/3/Report.PDF",
+                        "size": 3,
+                    },
+                    {
+                        "filename": "notes.txt",
+                        "content": "https://jira.example.com/secure/attachment/4/notes.txt",
+                        "size": 3,
+                    },
+                ]
+            },
+        }
+
+        result = dc_mixin.download_issue_attachments(
+            "ISSUE-1", "out", filename_pattern="*.pdf", base_dir=tmp_path
+        )
+
+        assert [d["filename"] for d in result["downloaded"]] == ["Report.PDF"]
+        assert result["skipped"] == ["notes.txt"]
+        assert result["total"] == 2
