@@ -607,10 +607,15 @@ async def get_issue(
     comment_limit: Annotated[
         int,
         Field(
-            description="Maximum number of comments to include (0 or null for no comments)",
+            description=(
+                "Maximum number of comments to include (0 or null for no "
+                "comments). The newest comments are returned, oldest first; "
+                "'comments_total' in the result is the size of the whole "
+                "thread, so raise the limit when it exceeds the comments shown."
+            ),
             default=10,
             ge=0,
-            le=100,
+            le=1000,
         ),
     ] = 10,
     properties: Annotated[
@@ -666,7 +671,7 @@ async def get_issue(
         issue_key: Jira issue key.
         fields: Comma-separated fields to return.
         expand: Optional fields to expand.
-        comment_limit: Maximum number of comments.
+        comment_limit: Maximum number of (newest) comments.
         properties: Issue properties to return.
         update_history: Whether to update issue view history.
         include: Comma-separated enrichment sections to inline.

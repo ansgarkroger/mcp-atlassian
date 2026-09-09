@@ -11,7 +11,11 @@ from mcp_atlassian.exceptions import MCPAtlassianAuthenticationError
 from mcp_atlassian.jira import JiraFetcher
 from mcp_atlassian.jira.issues import IssuesMixin, logger
 from mcp_atlassian.models.jira import JiraIssue
-from tests.utils.mocks import setup_api3_passthrough_mocks
+from tests.utils.mocks import (
+    jira_comment_page_calls,
+    mock_jira_comment_endpoint,
+    setup_api3_passthrough_mocks,
+)
 
 
 class TestIssuesMixin:
@@ -82,7 +86,7 @@ class TestIssuesMixin:
         )
 
         issues_mixin.jira.get_issue.return_value = issue_data
-        issues_mixin.jira.issue_get_comments.return_value = comments_data
+        mock_jira_comment_endpoint(issues_mixin.jira, comments_data)
 
         issue = issues_mixin.get_issue(
             "TEST-123",
@@ -97,7 +101,7 @@ class TestIssuesMixin:
             properties=None,
             update_history=True,
         )
-        issues_mixin.jira.issue_get_comments.assert_called_once_with("TEST-123")
+        assert jira_comment_page_calls(issues_mixin.jira) == [(0, 10)]
 
         # Verify the comments were added to the issue
         assert hasattr(issue, "comments")
@@ -137,11 +141,13 @@ class TestIssuesMixin:
         issue_data = make_issue_data(comment={"comments": []})
 
         issues_mixin.jira.get_issue.return_value = issue_data
-        issues_mixin.jira.issue_get_comments.return_value = comments_data
+        mock_jira_comment_endpoint(issues_mixin.jira, comments_data)
 
         issue = issues_mixin.get_issue("TEST-123", comment_limit=2)
 
-        issues_mixin.jira.issue_get_comments.assert_called_once_with("TEST-123")
+        # First page sizes the thread; the second reads only its tail.
+        assert jira_comment_page_calls(issues_mixin.jira) == [(0, 2), (1, 2)]
+        assert issue.comments_total == 3
         assert [comment.id for comment in issue.comments] == ["2", "3"]
         assert [comment.body for comment in issue.comments] == [
             "Middle comment",
@@ -179,7 +185,7 @@ class TestIssuesMixin:
         }
 
         issues_mixin.jira.get_issue.return_value = issue_data
-        issues_mixin.jira.issue_get_comments.return_value = comments_data
+        mock_jira_comment_endpoint(issues_mixin.jira, comments_data)
 
         issue = issues_mixin.get_issue("TEST-123", comment_limit=10)
 
@@ -187,7 +193,7 @@ class TestIssuesMixin:
         fields_param = call_args[1]["fields"]
         assert "comment" in fields_param
 
-        issues_mixin.jira.issue_get_comments.assert_called_once_with("TEST-123")
+        assert jira_comment_page_calls(issues_mixin.jira) == [(0, 10)]
         assert hasattr(issue, "comments")
         assert len(issue.comments) == 1
         assert issue.comments[0].body == "Auto-fetched comment"
@@ -217,7 +223,7 @@ class TestIssuesMixin:
         fields_param = call_args[1]["fields"]
         assert "comment" not in fields_param
 
-        issues_mixin.jira.issue_get_comments.assert_not_called()
+        assert jira_comment_page_calls(issues_mixin.jira) == []
 
     def test_get_issue_with_epic_info(self, issues_mixin: IssuesMixin, make_issue_data):
         """Test retrieving issue with epic information."""
@@ -315,7 +321,7 @@ class TestIssuesMixin:
 
         issues_mixin.jira.get_issue.return_value = make_issue_data()
 
-        issues_mixin.jira.issue_get_comments.return_value = {"comments": []}
+        mock_jira_comment_endpoint(issues_mixin.jira, [])
 
         # Call create_issue
         issue = issues_mixin.create_issue(
@@ -377,7 +383,7 @@ class TestIssuesMixin:
 
         issues_mixin.jira.get_issue.return_value = make_issue_data()
 
-        issues_mixin.jira.issue_get_comments.return_value = {"comments": []}
+        mock_jira_comment_endpoint(issues_mixin.jira, [])
 
         # Call create_issue with components=None
         issue = issues_mixin.create_issue(
@@ -412,7 +418,7 @@ class TestIssuesMixin:
             components=[{"name": "UI"}]
         )
 
-        issues_mixin.jira.issue_get_comments.return_value = {"comments": []}
+        mock_jira_comment_endpoint(issues_mixin.jira, [])
 
         # Call create_issue with a single component
         issue = issues_mixin.create_issue(
@@ -450,7 +456,7 @@ class TestIssuesMixin:
             components=[{"name": "UI"}, {"name": "API"}]
         )
 
-        issues_mixin.jira.issue_get_comments.return_value = {"comments": []}
+        mock_jira_comment_endpoint(issues_mixin.jira, [])
 
         # Call create_issue with multiple components
         issue = issues_mixin.create_issue(
@@ -489,7 +495,7 @@ class TestIssuesMixin:
             components=[{"name": "Valid"}, {"name": "Backend"}]
         )
 
-        issues_mixin.jira.issue_get_comments.return_value = {"comments": []}
+        mock_jira_comment_endpoint(issues_mixin.jira, [])
 
         # Call create_issue with components list containing invalid entries
         issue = issues_mixin.create_issue(
@@ -528,7 +534,7 @@ class TestIssuesMixin:
             components=[{"name": "Explicit"}]
         )
 
-        issues_mixin.jira.issue_get_comments.return_value = {"comments": []}
+        mock_jira_comment_endpoint(issues_mixin.jira, [])
 
         # Direct test for the precedence handling logic
         # Create fields dict with components already set by explicit parameter
@@ -689,7 +695,7 @@ class TestIssuesMixin:
         issue_dict = make_issue_data(summary="Updated Summary", status="In Progress")
         # Simulate atlassian-python-api returning a JSON string instead of dict
         issues_mixin.jira.get_issue.return_value = json.dumps(issue_dict)
-        issues_mixin.jira.issue_get_comments.return_value = {"comments": []}
+        mock_jira_comment_endpoint(issues_mixin.jira, [])
 
         document = issues_mixin.update_issue(
             issue_key="TEST-123", fields={"summary": "Updated Summary"}
@@ -705,15 +711,14 @@ class TestIssuesMixin:
         issue_dict = make_issue_data(summary="Refetched", status="Open")
         # First call returns non-JSON string, direct GET returns dict
         issues_mixin.jira.get_issue.return_value = "<html>WAF login page</html>"
-        issues_mixin.jira.get.return_value = issue_dict
         issues_mixin.jira.resource_url.return_value = "/rest/api/2/issue/TEST-123"
-        issues_mixin.jira.issue_get_comments.return_value = {"comments": []}
+        mock_jira_comment_endpoint(issues_mixin.jira, [], fallback=issue_dict)
 
         document = issues_mixin.update_issue(
             issue_key="TEST-123", fields={"summary": "Refetched"}
         )
 
-        issues_mixin.jira.get.assert_called_once_with("/rest/api/2/issue/TEST-123")
+        issues_mixin.jira.get.assert_any_call("/rest/api/2/issue/TEST-123")
         assert document.key == "TEST-123"
 
     def test_update_issue_basic(self, issues_mixin: IssuesMixin, make_issue_data):
@@ -722,7 +727,7 @@ class TestIssuesMixin:
             summary="Updated Summary", status="In Progress"
         )
 
-        issues_mixin.jira.issue_get_comments.return_value = {"comments": []}
+        mock_jira_comment_endpoint(issues_mixin.jira, [])
 
         # Call the method
         document = issues_mixin.update_issue(
@@ -779,9 +784,14 @@ class TestIssuesMixin:
             ],
         }
         issues_mixin._put_api3 = MagicMock(return_value={})
-        issues_mixin.jira.get.side_effect = [
-            {"key": "TEST-123", "fields": {"description": current_description}},
-        ]
+        mock_jira_comment_endpoint(
+            issues_mixin.jira,
+            [],
+            fallback={
+                "key": "TEST-123",
+                "fields": {"description": current_description},
+            },
+        )
         issues_mixin.jira.get_issue.return_value = make_issue_data(
             description=updated_description
         )
@@ -796,7 +806,7 @@ class TestIssuesMixin:
         assert call_args[0][0] == "issue/TEST-123"
         sent_description = call_args[0][1]["fields"]["description"]
         assert sent_description["content"][-1] == media_single
-        issues_mixin.jira.get.assert_called_once_with(
+        issues_mixin.jira.get.assert_any_call(
             "rest/api/3/issue/TEST-123",
             params={"fields": "description", "updateHistory": "false"},
         )
@@ -868,7 +878,7 @@ class TestIssuesMixin:
         issues_mixin.jira.get_issue.return_value = make_issue_data(
             summary="Updated Summary"
         )
-        issues_mixin.jira.issue_get_comments.return_value = {"comments": []}
+        mock_jira_comment_endpoint(issues_mixin.jira, [])
 
         issues_mixin.update_issue(
             issue_key="TEST-123",
@@ -925,7 +935,7 @@ class TestIssuesMixin:
         issues_mixin.jira.get_issue.return_value = make_issue_data(
             summary="Updated Summary"
         )
-        issues_mixin.jira.issue_get_comments.return_value = {"comments": []}
+        mock_jira_comment_endpoint(issues_mixin.jira, [])
 
         issues_mixin.update_issue(
             issue_key="TEST-123", fields={"summary": "Updated Summary"}
@@ -1005,7 +1015,7 @@ class TestIssuesMixin:
         issues_mixin.jira.get_issue.return_value = make_issue_data(
             description="This is a test"
         )
-        issues_mixin.jira.issue_get_comments.return_value = {"comments": []}
+        mock_jira_comment_endpoint(issues_mixin.jira, [])
         issues_mixin._get_account_id = MagicMock()
 
         issues_mixin.update_issue(
@@ -1025,7 +1035,7 @@ class TestIssuesMixin:
         issues_mixin.jira.get_issue.return_value = make_issue_data(
             description="This is a test"
         )
-        issues_mixin.jira.issue_get_comments.return_value = {"comments": []}
+        mock_jira_comment_endpoint(issues_mixin.jira, [])
         issues_mixin._get_account_id = MagicMock()
 
         issues_mixin.update_issue(
@@ -1046,7 +1056,7 @@ class TestIssuesMixin:
         issues_mixin.jira.get_issue.return_value = make_issue_data(
             description="This is a test"
         )
-        issues_mixin.jira.issue_get_comments.return_value = {"comments": []}
+        mock_jira_comment_endpoint(issues_mixin.jira, [])
         issues_mixin._get_account_id = MagicMock(side_effect=ValueError("not found"))
 
         with pytest.raises(ValueError, match="Could not update assignee"):
@@ -1061,7 +1071,7 @@ class TestIssuesMixin:
         issues_mixin.jira.get_issue.return_value = make_issue_data(
             description="This is a test"
         )
-        issues_mixin.jira.issue_get_comments.return_value = {"comments": []}
+        mock_jira_comment_endpoint(issues_mixin.jira, [])
         issues_mixin._get_account_id = MagicMock()
 
         document = issues_mixin.update_issue(issue_key="TEST-123", assignee=None)
@@ -1088,7 +1098,7 @@ class TestIssuesMixin:
         issues_mixin.jira.get_issue.return_value = make_issue_data(
             description="This is a test"
         )
-        issues_mixin.jira.issue_get_comments.return_value = {"comments": []}
+        mock_jira_comment_endpoint(issues_mixin.jira, [])
         issues_mixin._get_account_id = MagicMock(return_value="account-123")
 
         document = issues_mixin.assign_issue(
@@ -1108,7 +1118,7 @@ class TestIssuesMixin:
         issues_mixin.jira.get_issue.return_value = make_issue_data(
             description="This is a test"
         )
-        issues_mixin.jira.issue_get_comments.return_value = {"comments": []}
+        mock_jira_comment_endpoint(issues_mixin.jira, [])
         issues_mixin._get_account_id = MagicMock()
 
         document = issues_mixin.assign_issue(issue_key="TEST-123", assignee=None)
@@ -1124,7 +1134,7 @@ class TestIssuesMixin:
         issues_mixin.jira.get_issue.return_value = make_issue_data(
             description="This is a test"
         )
-        issues_mixin.jira.issue_get_comments.return_value = {"comments": []}
+        mock_jira_comment_endpoint(issues_mixin.jira, [])
         issues_mixin._get_account_id = MagicMock()
 
         document = issues_mixin.assign_issue(issue_key="TEST-123", assignee="")
@@ -1140,7 +1150,7 @@ class TestIssuesMixin:
         issues_mixin.jira.get_issue.return_value = make_issue_data(
             description="This is a test"
         )
-        issues_mixin.jira.issue_get_comments.return_value = {"comments": []}
+        mock_jira_comment_endpoint(issues_mixin.jira, [])
         issues_mixin._get_account_id = MagicMock()
 
         document = issues_mixin.assign_issue(
@@ -1162,7 +1172,7 @@ class TestIssuesMixin:
         issues_mixin.jira.get_issue.return_value = make_issue_data(
             description="This is a test"
         )
-        issues_mixin.jira.issue_get_comments.return_value = {"comments": []}
+        mock_jira_comment_endpoint(issues_mixin.jira, [])
         issues_mixin._get_account_id = MagicMock()
 
         document = issues_mixin.assign_issue(
@@ -1195,7 +1205,7 @@ class TestIssuesMixin:
             },
         }
         issues_mixin.jira.get_issue.return_value = issue_data
-        issues_mixin.jira.issue_get_comments.return_value = {"comments": []}
+        mock_jira_comment_endpoint(issues_mixin.jira, [])
         issues_mixin._generate_field_map = MagicMock(  # type: ignore[assignment]
             return_value={"components": "components"}
         )
@@ -1229,7 +1239,7 @@ class TestIssuesMixin:
             },
         }
         issues_mixin.jira.get_issue.return_value = issue_data
-        issues_mixin.jira.issue_get_comments.return_value = {"comments": []}
+        mock_jira_comment_endpoint(issues_mixin.jira, [])
         issues_mixin._generate_field_map = MagicMock(  # type: ignore[assignment]
             return_value={"components": "components"}
         )
@@ -1261,7 +1271,7 @@ class TestIssuesMixin:
             },
         }
         issues_mixin.jira.get_issue.return_value = issue_data
-        issues_mixin.jira.issue_get_comments.return_value = {"comments": []}
+        mock_jira_comment_endpoint(issues_mixin.jira, [])
         issues_mixin._generate_field_map = MagicMock(  # type: ignore[assignment]
             return_value={"components": "components"}
         )
@@ -1290,7 +1300,7 @@ class TestIssuesMixin:
             },
         }
         issues_mixin.jira.get_issue.return_value = issue_data
-        issues_mixin.jira.issue_get_comments.return_value = {"comments": []}
+        mock_jira_comment_endpoint(issues_mixin.jira, [])
 
         issues_mixin.update_issue(issue_key="TEST-123", priority=None)
 
@@ -1313,7 +1323,7 @@ class TestIssuesMixin:
             },
         }
         issues_mixin.jira.get_issue.return_value = issue_data
-        issues_mixin.jira.issue_get_comments.return_value = {"comments": []}
+        mock_jira_comment_endpoint(issues_mixin.jira, [])
 
         issues_mixin.update_issue(issue_key="TEST-123", parent="EPIC-1")
 
@@ -1334,7 +1344,7 @@ class TestIssuesMixin:
             },
         }
         issues_mixin.jira.get_issue.return_value = issue_data
-        issues_mixin.jira.issue_get_comments.return_value = {"comments": []}
+        mock_jira_comment_endpoint(issues_mixin.jira, [])
 
         issues_mixin.update_issue(issue_key="TEST-123", parent={"key": "EPIC-2"})
 
@@ -1362,7 +1372,7 @@ class TestIssuesMixin:
             },
         }
         issues_mixin.jira.get_issue.return_value = issue_data
-        issues_mixin.jira.issue_get_comments.return_value = {"comments": []}
+        mock_jira_comment_endpoint(issues_mixin.jira, [])
 
         if input_style == "keyword":
             document = issues_mixin.update_issue(
@@ -1395,7 +1405,7 @@ class TestIssuesMixin:
             },
         }
         issues_mixin.jira.get_issue.return_value = issue_data
-        issues_mixin.jira.issue_get_comments.return_value = {"comments": []}
+        mock_jira_comment_endpoint(issues_mixin.jira, [])
 
         with pytest.raises(ValueError, match="supported only on Jira Cloud"):
             issues_mixin.update_issue(issue_key="TEST-123", parent=parent_value)
@@ -1435,7 +1445,7 @@ class TestIssuesMixin:
             },
         }
         issues_mixin.jira.get_issue.return_value = issue_data
-        issues_mixin.jira.issue_get_comments.return_value = {"comments": []}
+        mock_jira_comment_endpoint(issues_mixin.jira, [])
 
         issues_mixin.update_issue(issue_key="TEST-123", parent=123)
 
@@ -2985,11 +2995,11 @@ class TestIssuesMixin:
         self, issues_mixin: IssuesMixin
     ):
         """Test invalid comment responses produce an empty comment list."""
-        issues_mixin.jira.issue_get_comments.return_value = []
+        issues_mixin.jira.get.return_value = []
 
         result = issues_mixin._get_issue_comments_if_needed("TEST-123", 10)
 
-        assert result == []
+        assert result == ([], None)
 
     def test_get_issue_comments_if_needed_skips_zero_limit(
         self, issues_mixin: IssuesMixin
@@ -2997,8 +3007,69 @@ class TestIssuesMixin:
         """Test a zero comment limit avoids the Jira comments endpoint."""
         result = issues_mixin._get_issue_comments_if_needed("TEST-123", 0)
 
-        assert result == []
-        issues_mixin.jira.issue_get_comments.assert_not_called()
+        assert result == ([], None)
+        issues_mixin.jira.get.assert_not_called()
+
+    def test_get_issue_comment_limit_returns_newest_of_long_thread(
+        self, issues_mixin: IssuesMixin, make_issue_data: Any
+    ) -> None:
+        """Regression: a thread longer than one page must not lose its tail.
+
+        Jira Server/DC pages the comment endpoint at 50 by default, so an
+        unpaginated read of a 77-comment thread returned the oldest 50 and
+        ``comment_limit`` then kept the newest of *those*, hiding the most
+        recent comments entirely.
+        """
+        thread = [
+            {
+                "id": str(i),
+                "body": f"Comment {i}",
+                "author": {"displayName": "Someone"},
+                "created": f"2023-01-{(i % 28) + 1:02d}T00:00:00.000+0000",
+                "updated": f"2023-01-{(i % 28) + 1:02d}T00:00:00.000+0000",
+            }
+            for i in range(1, 78)
+        ]
+        issues_mixin.jira.get_issue.return_value = make_issue_data(
+            comment={"comments": thread[:50], "total": 77}
+        )
+        mock_jira_comment_endpoint(issues_mixin.jira, thread)
+
+        issue = issues_mixin.get_issue("TEST-123", comment_limit=10)
+
+        assert jira_comment_page_calls(issues_mixin.jira) == [(0, 10), (67, 10)]
+        assert issue.comments_total == 77
+        assert [c.id for c in issue.comments] == [str(i) for i in range(68, 78)]
+        assert issue.to_simplified_dict()["comments_total"] == 77
+
+    def test_get_issue_comment_limit_all_walks_every_page(
+        self, issues_mixin: IssuesMixin, make_issue_data: Any
+    ) -> None:
+        """``comment_limit="all"`` collects every page of the thread."""
+        thread = [
+            {
+                "id": str(i),
+                "body": f"Comment {i}",
+                "author": {"displayName": "Someone"},
+                "created": "2023-01-01T00:00:00.000+0000",
+                "updated": "2023-01-01T00:00:00.000+0000",
+            }
+            for i in range(1, 251)
+        ]
+        issues_mixin.jira.get_issue.return_value = make_issue_data(
+            comment={"comments": thread[:50], "total": 250}
+        )
+        mock_jira_comment_endpoint(issues_mixin.jira, thread)
+
+        issue = issues_mixin.get_issue("TEST-123", comment_limit="all")
+
+        assert jira_comment_page_calls(issues_mixin.jira) == [
+            (0, 100),
+            (100, 100),
+            (200, 50),
+        ]
+        assert len(issue.comments) == 250
+        assert issue.comments_total == 250
 
 
 class TestMoveIssue:

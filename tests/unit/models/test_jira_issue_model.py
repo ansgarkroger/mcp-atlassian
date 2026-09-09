@@ -1034,3 +1034,64 @@ class TestDisplayNameMethods:
         sp = by_name["Story Points"]
         assert "name" not in sp
         assert sp["field_id"] == "customfield_10001"
+
+
+class TestJiraIssueCommentsTotal:
+    """The size of the comment thread travels with the (paginated) comments."""
+
+    def test_comments_total_is_read_from_the_comment_field(self):
+        issue = JiraIssue.from_api_response(
+            {
+                "id": "1",
+                "key": "TEST-1",
+                "fields": {
+                    "summary": "Thread",
+                    "comment": {
+                        "startAt": 0,
+                        "maxResults": 50,
+                        "total": 77,
+                        "comments": [
+                            {
+                                "id": "10",
+                                "body": "newest",
+                                "author": {"displayName": "Someone"},
+                            }
+                        ],
+                    },
+                },
+            }
+        )
+
+        assert issue.comments_total == 77
+        assert len(issue.comments) == 1
+        simplified = issue.to_simplified_dict()
+        assert simplified["comments_total"] == 77
+        assert len(simplified["comments"]) == 1
+
+    def test_comments_total_absent_when_jira_does_not_report_it(self):
+        issue = JiraIssue.from_api_response(
+            {
+                "id": "1",
+                "key": "TEST-1",
+                "fields": {"summary": "No thread", "comment": {"comments": []}},
+            }
+        )
+
+        assert issue.comments_total is None
+        assert "comments_total" not in issue.to_simplified_dict()
+
+    def test_comments_total_follows_the_comment_field_selection(self):
+        issue = JiraIssue.from_api_response(
+            {
+                "id": "1",
+                "key": "TEST-1",
+                "fields": {
+                    "summary": "Thread",
+                    "comment": {"total": 3, "comments": []},
+                },
+            },
+            requested_fields=["summary"],
+        )
+
+        assert issue.comments_total == 3
+        assert "comments_total" not in issue.to_simplified_dict()

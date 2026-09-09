@@ -12,6 +12,8 @@ from unittest.mock import Mock
 
 import pytest
 
+from tests.utils.mocks import mock_jira_comment_endpoint
+
 
 class TestFormatConversionIntegration:
     """Integration tests for format conversion in get_issue/create_issue flow."""
@@ -90,18 +92,21 @@ class TestFormatConversionIntegration:
             },
         }
 
-        # Need to mock issue_get_comments as well
-        jira_fetcher_with_real_preprocessor.jira.issue_get_comments.return_value = {
-            "comments": [
-                {
-                    "id": "10001",
-                    "body": "h1. Important Update\n\n# First item\n# Second item\n\n*Status:* Done",
-                    "created": "2023-01-01T10:00:00.000+0000",
-                    "updated": "2023-01-01T10:00:00.000+0000",
-                    "author": {"displayName": "Test User"},
-                }
-            ]
-        }
+        # The paginated comment endpoint serves the thread
+        mock_jira_comment_endpoint(
+            jira_fetcher_with_real_preprocessor.jira,
+            {
+                "comments": [
+                    {
+                        "id": "10001",
+                        "body": "h1. Important Update\n\n# First item\n# Second item\n\n*Status:* Done",
+                        "created": "2023-01-01T10:00:00.000+0000",
+                        "updated": "2023-01-01T10:00:00.000+0000",
+                        "author": {"displayName": "Test User"},
+                    }
+                ]
+            },
+        )
 
         # Call get_issue with comments
         result = jira_fetcher_with_real_preprocessor.get_issue(

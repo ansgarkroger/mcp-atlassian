@@ -36,6 +36,91 @@ logger = logging.getLogger("mcp-jira")
 _CANONICAL_ISSUE_KEY_RE = re.compile(r"^[A-Z][A-Z0-9_]*-\d+$")
 
 
+# Page size for the comment endpoint. Jira Server/DC defaults to 50 when
+# ``maxResults`` is omitted, so callers that do not paginate silently lose the
+# newest comments of any long thread (see ``fetch_issue_comments``).
+COMMENT_PAGE_SIZE = 100
+
+
+def _get_comment_page(
+    jira: Any, url: str, start_at: int, max_results: int
+) -> dict[str, Any]:
+    """Fetch one page of the comment endpoint and validate its shape."""
+    result = jira.get(url, params={"startAt": start_at, "maxResults": max_results})
+    if not isinstance(result, dict):
+        msg = f"Unexpected return value type from comment API: {type(result)}"
+        logger.error(msg)
+        raise TypeError(msg)
+    return result
+
+
+def fetch_issue_comments(
+    jira: Any,
+    issue_key: str,
+    limit: int | None = None,
+    page_size: int = COMMENT_PAGE_SIZE,
+) -> tuple[list[dict[str, Any]], int]:
+    """Fetch an issue's comments, oldest first, across every page.
+
+    ``GET /issue/{key}/comment`` is paginated: Server/DC returns at most 50
+    comments per page by default and Cloud has its own ceiling, so a single
+    unpaginated call only ever sees the *oldest* page of a long thread. This
+    helper walks the pages explicitly and, when a ``limit`` is given, reads
+    only the tail of the thread so the newest comments are the ones returned.
+
+    Args:
+        jira: The ``atlassian.Jira`` client.
+        issue_key: The issue key (e.g. 'PROJ-123').
+        limit: Return at most this many comments (the newest ones). ``None``
+            returns every comment.
+        page_size: Comments requested per page.
+
+    Returns:
+        A ``(comments, total)`` tuple: the comments in ascending creation
+        order (a suffix of the full thread when ``limit`` applies) and the
+        total number of comments on the issue as reported by Jira.
+
+    Raises:
+        TypeError: If the API returns an unexpected payload.
+        requests.exceptions.HTTPError: If the API call fails.
+    """
+    if limit is not None and limit <= 0:
+        return [], 0
+
+    base_url = jira.resource_url("issue")
+    url = f"{base_url}/{issue_key}/comment"
+    page_size = max(1, page_size)
+
+    first = _get_comment_page(
+        jira, url, 0, page_size if limit is None else min(limit, page_size)
+    )
+    comments: list[dict[str, Any]] = list(first.get("comments", []))
+    total = first.get("total")
+    if not isinstance(total, int) or total < len(comments):
+        total = len(comments)
+
+    if limit is not None and total > limit:
+        # Only the newest ``limit`` comments are wanted; they live at the end
+        # of the oldest-first listing, so restart from there.
+        comments = []
+        start_at = total - limit
+    else:
+        start_at = len(comments)
+
+    while start_at < total:
+        page = _get_comment_page(
+            jira, url, start_at, min(page_size, total - start_at)
+        ).get("comments", [])
+        if not page:
+            break
+        comments.extend(page)
+        start_at += len(page)
+
+    if limit is not None:
+        comments = comments[-limit:]
+    return comments, total
+
+
 def _http_status(exc: BaseException) -> int | None:
     """Extract the HTTP status code from an exception, if it carries one.
 
@@ -107,7 +192,8 @@ class CommentsMixin(JiraClient):
 
         Args:
             issue_key: The issue key (e.g. 'PROJ-123')
-            limit: Maximum number of comments to return
+            limit: Maximum number of comments to return. The newest ``limit``
+                comments are returned, in ascending creation order.
 
         Returns:
             List of comments with author, creation date, and content
@@ -116,15 +202,10 @@ class CommentsMixin(JiraClient):
             Exception: If there is an error getting comments
         """
         try:
-            comments = self.jira.issue_get_comments(issue_key)
-
-            if not isinstance(comments, dict):
-                msg = f"Unexpected return value type from `jira.issue_get_comments`: {type(comments)}"
-                logger.error(msg)
-                raise TypeError(msg)
+            comments, _total = fetch_issue_comments(self.jira, issue_key, limit=limit)
 
             processed_comments = []
-            for comment in comments.get("comments", [])[:limit]:
+            for comment in comments:
                 # On Jira Cloud (REST API v3) comment bodies are returned as ADF
                 # (Atlassian Document Format) dicts. convert to plain text before
                 # passing to _clean_text -> clean_jira_text -> _process_mentions,

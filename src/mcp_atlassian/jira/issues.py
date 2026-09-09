@@ -15,6 +15,7 @@ from ..models.jira.adf import merge_adf_with_preserved_media
 from ..models.jira.common import JiraChangelog
 from ..utils import parse_date
 from .client import JiraClient
+from .comments import fetch_issue_comments
 from .constants import DEFAULT_READ_JIRA_FIELDS
 from .protocols import (
     AttachmentsOperationsProto,
@@ -226,11 +227,13 @@ class IssuesMixin(
             # Get comments if needed
             if "comment" in fields_data:
                 comment_limit_int = self._normalize_comment_limit(comment_limit)
-                comments = self._get_issue_comments_if_needed(
+                comments, comments_total = self._get_issue_comments_if_needed(
                     issue_key, comment_limit_int
                 )
                 # Add comments to the issue data for processing by the model
                 fields_data["comment"]["comments"] = comments
+                if comments_total is not None:
+                    fields_data["comment"]["total"] = comments_total
 
             # Clean comment bodies (convert Jira wiki markup/HTML to Markdown)
             # Must happen AFTER _get_issue_comments_if_needed which may replace comments
@@ -352,36 +355,31 @@ class IssuesMixin(
 
     def _get_issue_comments_if_needed(
         self, issue_key: str, comment_limit: int | None
-    ) -> list[dict]:
+    ) -> tuple[list[dict], int | None]:
         """
         Get comments for an issue if needed.
 
+        The comment endpoint is paginated, so this walks every page and keeps
+        the newest ``comment_limit`` comments (see ``fetch_issue_comments``).
+
         Args:
             issue_key: The issue key
-            comment_limit: Maximum number of comments to include
+            comment_limit: Maximum number of comments to include; ``None``
+                includes every comment.
 
         Returns:
-            List of comments
+            A ``(comments, total)`` tuple: the comments in ascending creation
+            order and the total number of comments on the issue, or ``None``
+            when the total is unknown (comments not requested, or the API
+            call failed).
         """
         if comment_limit is None or comment_limit > 0:
             try:
-                response = self.jira.issue_get_comments(issue_key)
-                if not isinstance(response, dict):
-                    msg = f"Unexpected return value type from `jira.issue_get_comments`: {type(response)}"
-                    logger.error(msg)
-                    raise TypeError(msg)
-
-                comments = response["comments"]
-
-                # Jira returns comments oldest-first; keep the newest comments.
-                if comment_limit is not None:
-                    comments = comments[-comment_limit:]
-
-                return comments
+                return fetch_issue_comments(self.jira, issue_key, limit=comment_limit)
             except Exception as e:
                 logger.warning(f"Error getting comments for {issue_key}: {str(e)}")
-                return []
-        return []
+                return [], None
+        return [], None
 
     def _extract_epic_information(self, issue: dict) -> dict[str, str | None]:
         """

@@ -5,7 +5,8 @@ from unittest.mock import Mock
 import pytest
 from requests.exceptions import HTTPError
 
-from mcp_atlassian.jira.comments import CommentsMixin
+from mcp_atlassian.jira.comments import CommentsMixin, fetch_issue_comments
+from tests.utils.mocks import jira_comment_page_calls, mock_jira_comment_endpoint
 
 
 class TestCommentsMixin:
@@ -31,23 +32,26 @@ class TestCommentsMixin:
     def test_get_issue_comments_basic(self, comments_mixin):
         """Test get_issue_comments with basic data."""
         # Setup mock response
-        comments_mixin.jira.issue_get_comments.return_value = {
-            "comments": [
-                {
-                    "id": "10001",
-                    "body": "This is a comment",
-                    "created": "2024-01-01T10:00:00.000+0000",
-                    "updated": "2024-01-01T11:00:00.000+0000",
-                    "author": {"displayName": "John Doe"},
-                }
-            ]
-        }
+        mock_jira_comment_endpoint(
+            comments_mixin.jira,
+            {
+                "comments": [
+                    {
+                        "id": "10001",
+                        "body": "This is a comment",
+                        "created": "2024-01-01T10:00:00.000+0000",
+                        "updated": "2024-01-01T11:00:00.000+0000",
+                        "author": {"displayName": "John Doe"},
+                    }
+                ]
+            },
+        )
 
         # Call the method
         result = comments_mixin.get_issue_comments("TEST-123")
 
         # Verify
-        comments_mixin.jira.issue_get_comments.assert_called_once_with("TEST-123")
+        assert jira_comment_page_calls(comments_mixin.jira) == [(0, 50)]
         assert len(result) == 1
         assert result[0]["id"] == "10001"
         assert result[0]["body"] == "This is a comment"
@@ -57,64 +61,73 @@ class TestCommentsMixin:
     def test_get_issue_comments_with_limit(self, comments_mixin):
         """Test get_issue_comments with limit parameter."""
         # Setup mock response with multiple comments
-        comments_mixin.jira.issue_get_comments.return_value = {
-            "comments": [
-                {
-                    "id": "10001",
-                    "body": "First comment",
-                    "created": "2024-01-01T10:00:00.000+0000",
-                    "author": {"displayName": "John Doe"},
-                },
-                {
-                    "id": "10002",
-                    "body": "Second comment",
-                    "created": "2024-01-02T10:00:00.000+0000",
-                    "author": {"displayName": "Jane Smith"},
-                },
-                {
-                    "id": "10003",
-                    "body": "Third comment",
-                    "created": "2024-01-03T10:00:00.000+0000",
-                    "author": {"displayName": "Bob Johnson"},
-                },
-            ]
-        }
+        mock_jira_comment_endpoint(
+            comments_mixin.jira,
+            {
+                "comments": [
+                    {
+                        "id": "10001",
+                        "body": "First comment",
+                        "created": "2024-01-01T10:00:00.000+0000",
+                        "author": {"displayName": "John Doe"},
+                    },
+                    {
+                        "id": "10002",
+                        "body": "Second comment",
+                        "created": "2024-01-02T10:00:00.000+0000",
+                        "author": {"displayName": "Jane Smith"},
+                    },
+                    {
+                        "id": "10003",
+                        "body": "Third comment",
+                        "created": "2024-01-03T10:00:00.000+0000",
+                        "author": {"displayName": "Bob Johnson"},
+                    },
+                ]
+            },
+        )
 
         # Call the method with limit=2
         result = comments_mixin.get_issue_comments("TEST-123", limit=2)
 
-        # Verify
-        comments_mixin.jira.issue_get_comments.assert_called_once_with("TEST-123")
+        # Verify: the newest two comments, still oldest first. The first page
+        # sizes the thread, the second reads only its tail.
+        assert jira_comment_page_calls(comments_mixin.jira) == [(0, 2), (1, 2)]
         assert len(result) == 2  # Only 2 comments should be returned
-        assert result[0]["id"] == "10001"
-        assert result[1]["id"] == "10002"
-        # Third comment shouldn't be included due to limit
+        assert result[0]["id"] == "10002"
+        assert result[1]["id"] == "10003"
+        # First comment shouldn't be included due to limit
 
     def test_get_issue_comments_with_missing_fields(self, comments_mixin):
         """Test get_issue_comments with missing fields in the response."""
         # Setup mock response with missing fields
-        comments_mixin.jira.issue_get_comments.return_value = {
-            "comments": [
-                {
-                    "id": "10001",
-                    # Missing body field
-                    "created": "2024-01-01T10:00:00.000+0000",
-                    # Missing author field
-                },
-                {
-                    # Missing id field
-                    "body": "Second comment",
-                    # Missing created field
-                    "author": {},  # Empty author object
-                },
-                {
-                    "id": "10003",
-                    "body": "Third comment",
-                    "created": "2024-01-03T10:00:00.000+0000",
-                    "author": {"name": "user123"},  # Using name instead of displayName
-                },
-            ]
-        }
+        mock_jira_comment_endpoint(
+            comments_mixin.jira,
+            {
+                "comments": [
+                    {
+                        "id": "10001",
+                        # Missing body field
+                        "created": "2024-01-01T10:00:00.000+0000",
+                        # Missing author field
+                    },
+                    {
+                        # Missing id field
+                        "body": "Second comment",
+                        # Missing created field
+                        "author": {},  # Empty author object
+                    },
+                    {
+                        "id": "10003",
+                        "body": "Third comment",
+                        "created": "2024-01-03T10:00:00.000+0000",
+                        "author": {
+                            "name": "user123"
+                        },  # Using name instead of displayName
+                    },
+                ]
+            },
+        )
 
         # Call the method
         result = comments_mixin.get_issue_comments("TEST-123")
@@ -137,7 +150,7 @@ class TestCommentsMixin:
     def test_get_issue_comments_with_empty_response(self, comments_mixin):
         """Test get_issue_comments with an empty response."""
         # Setup mock response with no comments
-        comments_mixin.jira.issue_get_comments.return_value = {"comments": []}
+        mock_jira_comment_endpoint(comments_mixin.jira, [])
 
         # Call the method
         result = comments_mixin.get_issue_comments("TEST-123")
@@ -148,7 +161,7 @@ class TestCommentsMixin:
     def test_get_issue_comments_with_error(self, comments_mixin):
         """Test get_issue_comments with an error response."""
         # Setup mock to raise exception
-        comments_mixin.jira.issue_get_comments.side_effect = Exception("API Error")
+        comments_mixin.jira.get.side_effect = Exception("API Error")
 
         # Verify it raises the wrapped exception
         with pytest.raises(Exception, match="Error getting comments"):
@@ -160,39 +173,42 @@ class TestCommentsMixin:
         TypeError from re.sub() in _process_mentions because the dict was
         passed straight to _clean_text. adf_to_text() must be applied
         first, matching the pattern in add_comment / edit_comment."""
-        comments_mixin.jira.issue_get_comments.return_value = {
-            "comments": [
-                {
-                    "id": "10001",
-                    "body": {
-                        "type": "doc",
-                        "version": 1,
-                        "content": [
-                            {
-                                "type": "paragraph",
-                                "content": [
-                                    {
-                                        "type": "text",
-                                        "text": "Hello from ADF",
-                                    }
-                                ],
-                            }
-                        ],
+        mock_jira_comment_endpoint(
+            comments_mixin.jira,
+            {
+                "comments": [
+                    {
+                        "id": "10001",
+                        "body": {
+                            "type": "doc",
+                            "version": 1,
+                            "content": [
+                                {
+                                    "type": "paragraph",
+                                    "content": [
+                                        {
+                                            "type": "text",
+                                            "text": "Hello from ADF",
+                                        }
+                                    ],
+                                }
+                            ],
+                        },
+                        "created": "2024-01-01T10:00:00.000+0000",
+                        "updated": "2024-01-01T11:00:00.000+0000",
+                        "author": {"displayName": "John Doe"},
                     },
-                    "created": "2024-01-01T10:00:00.000+0000",
-                    "updated": "2024-01-01T11:00:00.000+0000",
-                    "author": {"displayName": "John Doe"},
-                },
-                {
-                    "id": "10002",
-                    # Plain string body must still work unchanged
-                    "body": "This is a plain text comment",
-                    "created": "2024-01-02T10:00:00.000+0000",
-                    "updated": "2024-01-02T11:00:00.000+0000",
-                    "author": {"displayName": "Jane Smith"},
-                },
-            ]
-        }
+                    {
+                        "id": "10002",
+                        # Plain string body must still work unchanged
+                        "body": "This is a plain text comment",
+                        "created": "2024-01-02T10:00:00.000+0000",
+                        "updated": "2024-01-02T11:00:00.000+0000",
+                        "author": {"displayName": "Jane Smith"},
+                    },
+                ]
+            },
+        )
 
         result = comments_mixin.get_issue_comments("TEST-123")
 
@@ -1277,3 +1293,89 @@ def _node_types_with_marks(adf: dict) -> list[list[str]]:
 
     walk(adf)
     return out
+
+
+class TestFetchIssueComments:
+    """Tests for the paginated comment fetch shared by the mixins."""
+
+    @staticmethod
+    def _thread(n: int) -> list[dict]:
+        return [{"id": str(i), "body": f"Comment {i}"} for i in range(1, n + 1)]
+
+    def test_walks_every_page_when_unlimited(self):
+        """A 250-comment thread needs three pages of 100."""
+        jira = Mock()
+        mock_jira_comment_endpoint(jira, self._thread(250))
+
+        comments, total = fetch_issue_comments(jira, "TEST-123")
+
+        assert total == 250
+        assert [c["id"] for c in comments] == [str(i) for i in range(1, 251)]
+        assert jira_comment_page_calls(jira) == [(0, 100), (100, 100), (200, 50)]
+
+    def test_limit_reads_only_the_tail(self):
+        """Regression for the 50-comment cap: the newest N of 77 comments."""
+        jira = Mock()
+        mock_jira_comment_endpoint(jira, self._thread(77))
+
+        comments, total = fetch_issue_comments(jira, "TEST-123", limit=10)
+
+        assert total == 77
+        assert [c["id"] for c in comments] == [str(i) for i in range(68, 78)]
+        assert jira_comment_page_calls(jira) == [(0, 10), (67, 10)]
+
+    def test_limit_larger_than_thread_is_a_single_request(self):
+        jira = Mock()
+        mock_jira_comment_endpoint(jira, self._thread(3))
+
+        comments, total = fetch_issue_comments(jira, "TEST-123", limit=10)
+
+        assert total == 3
+        assert [c["id"] for c in comments] == ["1", "2", "3"]
+        assert jira_comment_page_calls(jira) == [(0, 10)]
+
+    def test_limit_above_page_size_pages_the_tail(self):
+        """limit=150 of 400 comments: two tail pages, nothing older."""
+        jira = Mock()
+        mock_jira_comment_endpoint(jira, self._thread(400))
+
+        comments, total = fetch_issue_comments(jira, "TEST-123", limit=150)
+
+        assert total == 400
+        assert [c["id"] for c in comments] == [str(i) for i in range(251, 401)]
+        assert jira_comment_page_calls(jira) == [(0, 100), (250, 100), (350, 50)]
+
+    def test_zero_limit_skips_the_request(self):
+        jira = Mock()
+
+        assert fetch_issue_comments(jira, "TEST-123", limit=0) == ([], 0)
+        jira.get.assert_not_called()
+
+    def test_missing_total_falls_back_to_page_length(self):
+        """A server that omits ``total`` still yields the page it returned."""
+        jira = Mock()
+        jira.get.return_value = {"comments": self._thread(2)}
+
+        comments, total = fetch_issue_comments(jira, "TEST-123")
+
+        assert total == 2
+        assert len(comments) == 2
+        jira.get.assert_called_once()
+
+    def test_non_dict_response_raises(self):
+        jira = Mock()
+        jira.get.return_value = "<html>login</html>"
+
+        with pytest.raises(TypeError, match="Unexpected return value type"):
+            fetch_issue_comments(jira, "TEST-123")
+
+    def test_uses_the_issue_resource_url(self):
+        """The endpoint is built from resource_url so Cloud gets /rest/api/3."""
+        jira = Mock()
+        jira.resource_url.return_value = "rest/api/3/issue"
+        mock_jira_comment_endpoint(jira, self._thread(1))
+
+        fetch_issue_comments(jira, "TEST-123")
+
+        jira.resource_url.assert_called_once_with("issue")
+        assert jira.get.call_args.args[0] == "rest/api/3/issue/TEST-123/comment"

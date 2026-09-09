@@ -37,6 +37,61 @@ def setup_api3_passthrough_mocks(mixin: Any) -> None:
     mixin._put_api3 = Mock(side_effect=_mock_put_api3)
 
 
+def mock_jira_comment_endpoint(
+    mock_jira: Any,
+    comments: list[dict] | dict,
+    *,
+    fallback: Any = None,
+) -> Mock:
+    """Serve the paginated ``GET /issue/{key}/comment`` endpoint from a mock.
+
+    ``mock_jira.get`` becomes a fake of Jira's comment endpoint: it honours
+    ``startAt`` / ``maxResults`` and reports ``total``, exactly as Jira
+    Server/DC and Cloud do. Requests for any other URL are answered by
+    ``fallback`` (called with the request arguments when callable, returned
+    as-is otherwise).
+
+    Args:
+        mock_jira: The mock ``atlassian.Jira`` client (``mixin.jira``).
+        comments: The full comment thread, oldest first. A dict with a
+            ``comments`` key (the raw endpoint shape) is accepted too.
+        fallback: Response for non-comment URLs.
+
+    Returns:
+        The ``mock_jira.get`` mock, for call assertions.
+    """
+    thread = comments["comments"] if isinstance(comments, dict) else comments
+
+    def _get(url: Any, *args: Any, **kwargs: Any) -> Any:
+        if isinstance(url, str) and url.endswith("/comment"):
+            params = kwargs.get("params") or {}
+            start_at = int(params.get("startAt", 0))
+            max_results = int(params.get("maxResults", 50))
+            return {
+                "startAt": start_at,
+                "maxResults": max_results,
+                "total": len(thread),
+                "comments": thread[start_at : start_at + max_results],
+            }
+        if callable(fallback):
+            return fallback(url, *args, **kwargs)
+        return fallback
+
+    mock_jira.get.side_effect = _get
+    return mock_jira.get
+
+
+def jira_comment_page_calls(mock_jira: Any) -> list[tuple[int, int]]:
+    """Return the ``(startAt, maxResults)`` of every comment-endpoint call."""
+    calls = []
+    for call in mock_jira.get.call_args_list:
+        url = call.args[0] if call.args else call.kwargs.get("url")
+        if isinstance(url, str) and url.endswith("/comment"):
+            params = call.kwargs.get("params") or {}
+            calls.append((int(params.get("startAt", 0)), int(params["maxResults"])))
+    return calls
+
+
 class MockEnvironment:
     """Utility for mocking environment variables."""
 

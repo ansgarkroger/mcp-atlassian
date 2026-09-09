@@ -72,6 +72,7 @@ class JiraIssue(ApiModel, TimestampMixin):
     labels: list[str] = Field(default_factory=list)
     components: list[str] = Field(default_factory=list)
     comments: list[JiraComment] = Field(default_factory=list)
+    comments_total: int | None = None  # Comments on the issue, per Jira
     attachments: list[JiraAttachment] = Field(default_factory=list)
     timetracking: JiraTimetracking | None = None
     url: str | None = None
@@ -405,15 +406,22 @@ class JiraIssue(ApiModel, TimestampMixin):
 
         # Handling comments
         comments = []
+        comments_total: int | None = None
         comments_field = fields.get("comment", {})
-        if isinstance(comments_field, dict) and "comments" in comments_field:
-            comments_data = comments_field["comments"]
-            if isinstance(comments_data, list):
-                comments = [
-                    JiraComment.from_api_response(comment)
-                    for comment in comments_data
-                    if comment
-                ]
+        if isinstance(comments_field, dict):
+            # Jira reports the thread size next to the (paginated) comments,
+            # so callers can tell a truncated listing from a complete one.
+            total = comments_field.get("total")
+            if isinstance(total, int) and not isinstance(total, bool):
+                comments_total = total
+            if "comments" in comments_field:
+                comments_data = comments_field["comments"]
+                if isinstance(comments_data, list):
+                    comments = [
+                        JiraComment.from_api_response(comment)
+                        for comment in comments_data
+                        if comment
+                    ]
 
         # Handling changelogs
         changelogs = []
@@ -505,6 +513,7 @@ class JiraIssue(ApiModel, TimestampMixin):
             labels=labels,
             components=components,
             comments=comments,
+            comments_total=comments_total,
             attachments=attachments,
             timetracking=timetracking,
             url=url,
@@ -642,6 +651,8 @@ class JiraIssue(ApiModel, TimestampMixin):
             result["comments"] = [
                 comment.to_simplified_dict() for comment in self.comments
             ]
+        if self.comments_total is not None and should_include_field("comment"):
+            result["comments_total"] = self.comments_total
 
         # Add attachments if available and requested
         if self.attachments and should_include_field("attachment"):
