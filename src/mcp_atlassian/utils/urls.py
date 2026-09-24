@@ -8,6 +8,8 @@ from collections.abc import Callable
 from typing import Any
 from urllib.parse import urljoin, urlparse
 
+from mcp_atlassian.exceptions import MCPAtlassianAuthenticationError
+
 
 def make_ssrf_redirect_hook() -> Callable[..., Any]:
     """Return a requests ``response`` hook that blocks SSRF-unsafe redirects.
@@ -24,6 +26,47 @@ def make_ssrf_redirect_hook() -> Callable[..., Any]:
                 response.close()
                 raise ValueError(f"Redirect blocked (SSRF): {error}")
         return response
+
+    return hook
+
+
+def make_sign_in_redirect_hook(
+    service_name: str, api_url: str, browser_url: str | None = None
+) -> Callable[..., Any]:
+    """Return a requests ``response`` hook that reports a sign-in gateway redirect.
+
+    Some Server/Data Center instances sit behind an authenticating gateway (for
+    example a corporate web filter that demands a browser SSO sign-in). The
+    gateway answers an API call with a redirect to its own login page, requests
+    follows it, and the caller receives an HTML page instead of JSON, which
+    otherwise surfaces as an opaque "unexpected return value type" error.
+
+    The hook fires on the final response of a call: an HTML page served from a
+    host other than ``api_url`` means the call was redirected away before it
+    reached the instance. It raises an authentication error naming the URL to
+    open in a browser (``browser_url``, defaulting to ``api_url``), where the
+    same gateway offers the sign-in and then returns the user to the instance.
+    """
+    instance_host = (
+        (urlparse(api_url).hostname or "").lower() if isinstance(api_url, str) else ""
+    )
+    sign_in_url = browser_url if isinstance(browser_url, str) else api_url
+
+    def hook(response: Any, **kwargs: Any) -> Any:
+        if response.is_redirect or not instance_host:
+            return response
+        content_type = response.headers.get("Content-Type", "").lower()
+        if not content_type.startswith("text/html"):
+            return response
+        landed_host = (urlparse(response.url).hostname or "").lower()
+        if not landed_host or landed_host == instance_host:
+            return response
+        response.close()
+        raise MCPAtlassianAuthenticationError(
+            f"{service_name} did not answer: the call was redirected to a sign-in "
+            f"page on {landed_host}. Sign in by opening {sign_in_url} in a browser, "
+            f"then retry."
+        )
 
     return hook
 

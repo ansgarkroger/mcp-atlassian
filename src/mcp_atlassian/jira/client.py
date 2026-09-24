@@ -26,7 +26,10 @@ from mcp_atlassian.utils.oauth import configure_oauth_session
 from mcp_atlassian.utils.proxy import apply_proxy_configuration
 from mcp_atlassian.utils.ssl import configure_ssl_verification
 from mcp_atlassian.utils.ssrf_adapter import mount_ssrf_pinning
-from mcp_atlassian.utils.urls import make_ssrf_redirect_hook
+from mcp_atlassian.utils.urls import (
+    make_sign_in_redirect_hook,
+    make_ssrf_redirect_hook,
+)
 from mcp_atlassian.utils.user_agent import get_default_user_agent
 
 from ..models.jira.adf import markdown_to_adf
@@ -187,6 +190,11 @@ class JiraClient:
         # (covers direct _session.get() paths and global/stdio fetchers, not just
         # the per-user HTTP path).
         self.jira._session.hooks["response"].append(make_ssrf_redirect_hook())
+        # Name the sign-in page when a gateway in front of Jira redirects the call
+        # to it, rather than failing later on an HTML body that is not JSON.
+        self.jira._session.hooks["response"].append(
+            make_sign_in_redirect_hook("Jira", transport_url, self.config.url)
+        )
         # Pin DNS resolution against rebinding: resolve+validate once and connect
         # to that address, closing the validate→reconnect TOCTOU. Preserves TLS SNI.
         mount_ssrf_pinning(self.jira._session, transport_url)

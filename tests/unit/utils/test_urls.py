@@ -1,5 +1,6 @@
 """Tests for the URL utilities module."""
 
+import io
 import os
 import socket
 from unittest.mock import patch
@@ -7,8 +8,10 @@ from unittest.mock import patch
 import pytest
 import requests
 
+from mcp_atlassian.exceptions import MCPAtlassianAuthenticationError
 from mcp_atlassian.utils.urls import (
     is_atlassian_cloud_url,
+    make_sign_in_redirect_hook,
     make_ssrf_redirect_hook,
     resolve_relative_url,
     validate_url_for_ssrf,
@@ -37,6 +40,64 @@ def test_redirect_hook_resolves_location_before_validation(
         assert make_ssrf_redirect_hook()(response) is response
 
     validate.assert_called_once_with(expected)
+
+
+def _html_response(url: str, status_code: int = 200) -> requests.Response:
+    response = requests.Response()
+    response.status_code = status_code
+    response.url = url
+    response.raw = io.BytesIO(b"<html></html>")
+    response.headers["Content-Type"] = "text/html; charset=utf-8"
+    return response
+
+
+def test_sign_in_hook_reports_html_page_on_another_host() -> None:
+    """An HTML page served off-host means a gateway intercepted the call."""
+    hook = make_sign_in_redirect_hook(
+        "Jira", "https://alm.example.eu/alm/jira", "https://alm.example.eu/alm/jira"
+    )
+    response = _html_response("https://gw-sso.example.eu/?cfru=abc")
+
+    with pytest.raises(MCPAtlassianAuthenticationError) as excinfo:
+        hook(response)
+
+    message = str(excinfo.value)
+    assert "gw-sso.example.eu" in message
+    assert "https://alm.example.eu/alm/jira" in message
+
+
+@pytest.mark.parametrize(
+    ("url", "content_type", "status_code"),
+    [
+        # HTML from the instance itself is left to the caller.
+        ("https://alm.example.eu/alm/jira/secure/Dashboard.jspa", "text/html", 200),
+        # Binary content from another host, e.g. a Cloud media redirect.
+        ("https://media.example.com/file/1", "application/octet-stream", 200),
+        # JSON from another host.
+        ("https://api.example.com/rest", "application/json", 200),
+        # The intermediate redirect hop itself.
+        ("https://gw-sso.example.eu/", "text/html", 302),
+    ],
+)
+def test_sign_in_hook_ignores_other_responses(
+    url: str, content_type: str, status_code: int
+) -> None:
+    """Only a final off-host HTML page counts as a sign-in redirect."""
+    hook = make_sign_in_redirect_hook("Jira", "https://alm.example.eu/alm/jira")
+    response = _html_response(url, status_code)
+    response.headers["Content-Type"] = content_type
+    if status_code == 302:
+        response.headers["Location"] = "https://gw-sso.example.eu/login"
+
+    assert hook(response) is response
+
+
+def test_sign_in_hook_defaults_browser_url_to_api_url() -> None:
+    """Without a browser URL the message points at the API URL."""
+    hook = make_sign_in_redirect_hook("Confluence", "https://wiki.example.eu/wiki")
+
+    with pytest.raises(MCPAtlassianAuthenticationError, match="wiki.example.eu/wiki"):
+        hook(_html_response("https://login.example.eu/"))
 
 
 class TestResolveRelativeUrl:
